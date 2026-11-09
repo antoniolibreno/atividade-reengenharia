@@ -1,7 +1,7 @@
 # Relatório: Pipeline de Evolução Segura (CI/CD)
 
-Rascunho do relatório em PDF a ser entregue no D2L. Os itens marcados com `PREENCHER` dependem da primeira
-execução real da esteira.
+Esteira de CI/CD do sistema reengenheirado: a cada tag de versão, o código passa por um portão de qualidade
+(SonarCloud) e por um portão de segurança (Trivy), e só a imagem aprovada nos dois é publicada no Docker Hub.
 
 ## 1. Repositório GitHub
 
@@ -31,16 +31,36 @@ A esteira só é disparada pelo push de uma tag de versão (`v1.0.0`). Ela tem t
 
 ## 4. Evidência do Sonar
 
-`PREENCHER`: screenshot do painel do SonarCloud (Measures > Complexity) mostrando a Complexidade Ciclomática,
-os Code Smells, as Duplicações e o status do Quality Gate.
+Painel: https://sonarcloud.io/summary/overall?id=antoniolibreno_atividade-reengenharia
 
-Legenda sugerida: "Análise da versão v1.0.0 no SonarCloud. A classe `legado/x_Mgr_F`, mantida de propósito como
-referência, concentra os Code Smells; o código reengenheirado aparece com baixa complexidade ciclomática."
+![Resumo da análise v1.0.0 no SonarCloud](evidencias/01-sonar-resumo.jpg)
+
+*Figura 1. Análise da versão v1.0.0: Quality Gate "Sonar way" aprovado, 367 linhas de código, cobertura de 100%,
+duplicação de 1,1% e nenhum Code Smell (Maintainability A) ou bug (Reliability A). Os 5 apontamentos de Security
+são do próprio workflow, que referencia as GitHub Actions por tag de versão em vez de SHA de commit; não estão no
+código Java e não reprovam o Quality Gate.*
+
+![Complexidade ciclomática por arquivo](evidencias/02-sonar-complexidade.jpg)
+
+*Figura 2. Measures > Complexity: complexidade ciclomática total de 27 (cognitiva de 12). A classe legada
+`x_Mgr_F`, mantida de propósito como referência, é a mais complexa (6) concentrada em um único método; no código
+reengenheirado a lógica fica distribuída em classes pequenas, cada regra de cobrança com complexidade de 1 a 2.
+O período de New Code aparece como "since v0.9.0" porque a análise da tag de teste da seção 6 ficou registrada
+no histórico.*
 
 ## 5. Evidência do Trivy
 
-`PREENCHER`: screenshot do log do job "Trivy Security Gate" com as tabelas de vulnerabilidades do repositório
-e da imagem.
+Execução: https://github.com/antoniolibreno/atividade-reengenharia/actions/runs/42720274367
+
+![Trivy no repositório](evidencias/03-trivy-repositorio-v1.0.0.jpg)
+
+*Figura 3. Trivy no repositório (`trivy fs`): nenhuma vulnerabilidade nas dependências do `pom.xml` e nenhuma
+má configuração no `Dockerfile`.*
+
+![Trivy na imagem](evidencias/04-trivy-imagem-v1.0.0.jpg)
+
+*Figura 4. Trivy na imagem `sistema-reengenheirado:v1.0.0`: nenhuma vulnerabilidade nos pacotes da Alpine 3.24.4
+nem nas bibliotecas dentro do `app.jar`. Com os dois scans limpos, o job de publicação foi liberado.*
 
 ## 6. Prova de que a esteira bloqueia
 
@@ -57,8 +77,15 @@ Em uma branch descartável foi adicionada ao `pom.xml` a dependência `log4j-cor
 
 Depois do teste, a tag `v0.9.0` e a branch foram apagadas; a execução continua no histórico do Actions.
 
-`PREENCHER`: screenshot dessa execução mostrando o job de segurança vermelho, a tabela de CVEs e o job de
-publicação como "skipped".
+![Execução bloqueada](evidencias/05-bloqueio-resumo-v0.9.0.jpg)
+
+*Figura 5. Execução da tag `v0.9.0`: SonarCloud aprovado, Trivy reprovado e "Build e Push para Docker Hub" pulado
+(ícone cinza), porque depende dos dois portões.*
+
+![CVEs encontradas](evidencias/06-bloqueio-cves-v0.9.0.jpg)
+
+*Figura 6. Tabela do Trivy com as três CVEs do `log4j-core` 2.14.1, a versão instalada e as versões que corrigem
+cada uma.*
 
 ## 7. Ensaio Crítico Final
 
