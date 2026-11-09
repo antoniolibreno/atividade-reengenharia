@@ -1,0 +1,163 @@
+name: Pipeline de Evolucao Segura (CI/CD)
+
+# 1. GATILHO: apenas tags de versao semantica (v1.0.0, v1.1.2).
+# Commits comuns, pull requests e tags fora do padrao NAO disparam a esteira.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: sistema-reengenheirado
+
+jobs:
+  # 2. QUALITY GATE DE CODIGO: build, testes, cobertura e SonarCloud.
+  qualidade:
+    name: SonarCloud Quality Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do codigo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # historico completo para o Sonar calcular New Code e blame
+
+      - name: Conferir configuracao do Sonar
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+        run: |
+          faltando=0
+          for nome in SONAR_TOKEN SONAR_ORGANIZATION SONAR_PROJECT_KEY; do
+            if [ -z "${!nome}" ]; then
+              echo "::error::$nome nao configurado em Settings > Secrets and variables > Actions"
+              faltando=1
+            fi
+          done
+          exit $faltando
+
+      - name: Configurar JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Cache dos pacotes do Sonar
+        uses: actions/cache@v6
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+
+      # mvn verify compila, roda os testes (falha quebra a esteira) e gera o jacoco.xml.
+      # sonar.qualitygate.wait=true faz o scanner esperar o Quality Gate e sair com erro se for reprovado.
+      - name: Build, testes e analise no SonarCloud
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: >
+          mvn -B verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar
+          -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
+          -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+          -Dsonar.projectVersion=${{ github.ref_name }}
+          -Dsonar.branch.name=main
+          -Dsonar.qualitygate.wait=true
+          -Dsonar.qualitygate.timeout=300
+
+  # 3. QUALITY GATE DE SEGURANCA: Trivy no repositorio e na imagem Docker.
+  seguranca:
+    name: Trivy Security Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do codigo
+        uses: actions/checkout@v7
+
+      # Dependencias do pom.xml, ma configuracao do Dockerfile/workflow e segredos commitados.
+      - name: Trivy (repositorio) - dependencias, configuracao e segredos
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig,secret
+          ignore-unfixed: true
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          hide-progress: true
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Build multi-stage; o estagio de build roda os testes de novo.
+      - name: Build da imagem (sem push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Pacotes do SO da imagem base (alpine) e bibliotecas dentro do app.jar.
+      - name: Trivy (imagem) - imagem base e bibliotecas
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          ignore-unfixed: true
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          hide-progress: true
+
+      # A imagem escaneada e guardada como artifact: o job de publicacao envia exatamente esta imagem.
+      - name: Salvar imagem escaneada
+        run: |
+          echo "ID da imagem escaneada: $(docker image inspect --format '{{.Id}}' "$IMAGE_NAME:$GITHUB_REF_NAME")"
+          docker save "$IMAGE_NAME:$GITHUB_REF_NAME" | gzip > imagem.tar.gz
+
+      - name: Enviar imagem para o job de publicacao
+        uses: actions/upload-artifact@v7
+        with:
+          name: imagem-${{ github.ref_name }}
+          path: imagem.tar.gz
+          retention-days: 1
+
+  # 4. ENTREGA CONTINUA: so roda se os dois gates acima passarem.
+  publicacao:
+    name: Build e Push para Docker Hub
+    needs: [qualidade, seguranca]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar imagem escaneada
+        uses: actions/download-artifact@v8
+        with:
+          name: imagem-${{ github.ref_name }}
+
+      - name: Carregar imagem
+        run: |
+          gunzip -c imagem.tar.gz | docker load
+          echo "ID da imagem publicada: $(docker image inspect --format '{{.Id}}' "$IMAGE_NAME:$GITHUB_REF_NAME")"
+
+      - name: Login no Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Push para o Docker Hub (versao e latest)
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+        run: |
+          destino="$DOCKER_USERNAME/$IMAGE_NAME"
+          docker tag "$IMAGE_NAME:$GITHUB_REF_NAME" "$destino:$GITHUB_REF_NAME"
+          docker tag "$IMAGE_NAME:$GITHUB_REF_NAME" "$destino:latest"
+          docker push "$destino:$GITHUB_REF_NAME"
+          docker push "$destino:latest"

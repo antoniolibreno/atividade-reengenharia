@@ -1,0 +1,12 @@
+target/
+.git/
+.github/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+**/.DS_Store
+docs/
+openspec/
+.claude/
+Reengenharia_Grupo/
